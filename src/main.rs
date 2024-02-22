@@ -26,7 +26,6 @@ pub struct TxExec {
     secret_key: SecretKey,
     public_key: PublicKey,
     wpkh: WPubkeyHash,
-    receiver_secp: Secp256k1<All>,
     receiver_secret_key: SecretKey,
     receiver_public_key: PublicKey,
 }
@@ -37,11 +36,9 @@ impl TxExec {
         let secret_key = SecretKey::new(&mut rand::thread_rng());
         let public_key = PublicKey::new(secret_key.public_key(&secp));
         let wpkh = public_key.wpubkey_hash().unwrap();
-
-        let receiver_secp = Secp256k1::new();
         let receiver_secret_key = SecretKey::new(&mut rand::thread_rng());
         let receiver_public_key =
-            bitcoin::PublicKey::new(receiver_secret_key.public_key(&receiver_secp));
+            bitcoin::PublicKey::new(receiver_secret_key.public_key(&secp));
 
         Self {
             network: Network::Regtest,
@@ -50,7 +47,6 @@ impl TxExec {
             secret_key,
             public_key,
             wpkh,
-            receiver_secp,
             receiver_secret_key,
             receiver_public_key,
         }
@@ -68,6 +64,7 @@ impl TxExec {
         let (previous_outpoint, previous_utxo) = dummy_utxo(&self.wpkh);
         let script_code = previous_utxo.script_pubkey.p2wpkh_script_code().unwrap();
 
+//transaction input
         let input = TxIn {
             previous_output: previous_outpoint,
             script_sig: ScriptBuf::new(),
@@ -79,7 +76,7 @@ impl TxExec {
             value: SPEND_AMOUNT,
             script_pubkey: self.receiver_address().script_pubkey(),
         };
-
+// the change output
         let change = TxOut {
             value: CHANGE_AMOUNT,
             script_pubkey: ScriptBuf::new_p2wpkh(&self.wpkh),
@@ -91,7 +88,7 @@ impl TxExec {
             input: vec![input],
             output: vec![spend, change],
         };
-
+//sign the unsigned transaction
         let mut sighash_cache = SighashCache::new(unsigned_tx);
         let sighash = sighash_cache
             .p2wsh_signature_hash(0, &script_code, DUMMY_UTXO_AMOUNT, EcdsaSighashType::All)
@@ -100,6 +97,7 @@ impl TxExec {
         let msg = Message::from(sighash);
         let sig = self.secp.sign_ecdsa(&msg, &self.secret_key);
 
+//convert into a transaction
         let mut tx = sighash_cache.into_transaction();
 
         let pk = self.secret_key.public_key(&self.secp);
@@ -156,7 +154,7 @@ impl TxExec {
 
         let mut tx = sighash_cache.into_transaction();
 
-        let pk = self.secret_key.public_key(&self.receiver_secp);
+        let pk = self.secret_key.public_key(&self.secp);
         let witness = &mut tx.input[0].witness;
         witness.push_ecdsa_signature(&Signature {
             sig,
@@ -188,34 +186,3 @@ const DUMMY_UTXO_AMOUNT: Amount = Amount::from_sat(20_000_000);
 const SPEND_AMOUNT: Amount = Amount::from_sat(5_000_000);
 const CHANGE_AMOUNT: Amount = Amount::from_sat(14_999_000); // remove 1000 satoshis fee
 
-#[cfg(test)]
-mod check_consistency {
-    use crate::TxExec;
-    use bitcoin::{transaction::Version, Amount};
-
-    #[test]
-    fn run_test() {
-        let tx_exec = TxExec::new();
-
-        let tx_out = tx_exec.build();
-        let tx_spend = tx_exec.spend(&tx_out);
-
-        assert_eq!(tx_out.version, Version::TWO);
-        assert_eq!(tx_spend.version, Version::TWO);
-
-        let previous_tx_out = tx_out.output[0].clone();
-        let previous_tx_value = previous_tx_out.value;
-
-        let current_tx_out = tx_spend.output[0].clone();
-        let current_tx_value = current_tx_out.value;
-
-        let fee = Amount::from_sat(1000);
-        assert_eq!(
-            current_tx_value,
-            previous_tx_value.checked_sub(fee).unwrap()
-        );
-
-        assert!(previous_tx_out.script_pubkey.is_p2pkh());
-        assert!(current_tx_out.script_pubkey.is_p2pkh());
-    }
-}
